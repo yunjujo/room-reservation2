@@ -82,7 +82,12 @@
   .toolbar select { width: auto; min-width: 140px; }
   .toolbar .week-label { font-weight: 700; margin: 0 6px; }
   .toolbar .spacer { flex: 1; }
-  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; position: relative; }
+  .tt-loading {
+    display: none; position: absolute; inset: 0; z-index: 2; align-items: center; justify-content: center;
+    background: rgba(255, 255, 255, .7); color: var(--accent-ink); font-weight: 700;
+  }
+  .table-wrap.loading .tt-loading { display: flex; }
   table.tt { width: 100%; min-width: 560px; border-collapse: separate; border-spacing: 4px; table-layout: fixed; }
   table.tt th { font-size: .9rem; color: var(--muted); font-weight: 600; padding: 6px 4px; }
   table.tt th.today { color: var(--accent-ink); }
@@ -102,6 +107,13 @@
   table.tt td.slot.booked span { font-size: .8rem; color: var(--muted); }
   table.tt td.slot.past:not(.booked) { cursor: default; background: #f3f4f1; border-style: solid; color: transparent; }
   table.tt td.slot.past:not(.booked):hover { border-color: var(--line); }
+  table.tt td.slot.closed, table.tt td.slot.closed:hover {
+    cursor: default; background: #eceee9; border: 1.5px solid transparent; color: #a3aaa5; font-size: .8rem;
+  }
+  table.tt td.slot.closed.blocked, table.tt td.slot.closed.blocked:hover {
+    background: #fff4d6; color: #8a6512; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;   /* 사유가 길면 … 로 줄임 */
+  }
   .hint { font-size: .85rem; color: var(--muted); margin: 8px 0 0; }
 
   /* 검색·목록 */
@@ -110,7 +122,7 @@
   .check input { width: auto; }
   .list { display: grid; gap: 8px; }
   .item {
-    display: grid; grid-template-columns: 150px 90px 1fr auto; gap: 12px; align-items: center;
+    display: grid; grid-template-columns: 150px 130px 1fr auto; gap: 12px; align-items: center;
     padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px;
   }
   .item .when { font-weight: 700; }
@@ -193,7 +205,7 @@
 
 <main>
   <div id="setup" class="setup" hidden>
-    index.html 맨 아래 &lt;script&gt;의 SUPABASE_URL, SUPABASE_KEY 값을 내 프로젝트 값으로 바꿔 주세요.
+    index.html의 SUPABASE_URL, SUPABASE_KEY 값을 내 프로젝트 값으로 바꿔 주세요.
     (Supabase › Project Settings › API Keys 에서 Project URL과 publishable key를 복사)
   </div>
 
@@ -247,14 +259,16 @@
       </div>
       <div>
         <label for="f-period">교시 <span class="req">*</span></label>
-        <select id="f-period" required>
-          <option value="1">1교시</option><option value="2">2교시</option><option value="3">3교시</option>
-          <option value="4">4교시</option><option value="5">5교시</option><option value="6">6교시</option>
-        </select>
+        <select id="f-period" required></select>
       </div>
-      <div class="wide">
+      <div>
         <label for="f-teacher">교사 이름 <span class="req">*</span></label>
         <input type="text" id="f-teacher" maxlength="20" placeholder="예: 김민지" required>
+      </div>
+      <div>
+        <label for="f-pin">취소용 PIN <span class="req">*</span></label>
+        <input type="password" id="f-pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}"
+          placeholder="숫자 4자리" autocomplete="off" required>
       </div>
       <div>
         <label for="f-grade">학년 <span class="req">*</span></label>
@@ -266,10 +280,6 @@
       <div>
         <label for="f-class">반</label>
         <input type="number" id="f-class" min="1" max="15" placeholder="예: 2">
-      </div>
-      <div class="full">
-        <label for="f-purpose">사용 목적</label>
-        <input type="text" id="f-purpose" maxlength="100" placeholder="예: 식물 관찰 실험">
       </div>
       <div class="full actions">
         <button type="submit" class="primary" id="f-submit">예약하기</button>
@@ -288,7 +298,8 @@
       <button type="button" id="w-next">다음 주 ▶</button>
       <button type="button" id="w-today">이번 주</button>
     </div>
-    <div class="table-wrap">
+    <div class="table-wrap" id="tt-wrap">
+      <div class="tt-loading">불러오는 중…</div>
       <table class="tt">
         <thead id="w-head"></thead>
         <tbody id="w-body"></tbody>
@@ -329,15 +340,112 @@
 // =====================================================================
 // ① 여기에 내 Supabase 값을 붙여 넣으세요 (publishable key만! secret key는 절대 금지)
 // =====================================================================
-const SUPABASE_URL = 'https://jtnxhpibypovskvtfaxs.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_3JSNwUDO8hlzJEo2CXr6zw_L4Zm8aYN';
+const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_YOUR-KEY';
+let db = null;   // Supabase 클라이언트 (콘솔에서 db.from(...) 으로도 사용 가능)
+
+// =====================================================================
+// 서버 함수: 구글 시트 버전의 서버 함수와 이름·결과를 똑같이 맞춤
+//   → 아래 화면 코드는 구글 시트 버전과 그대로 같음
+//   예약·취소의 규칙 검사는 모두 데이터베이스 함수(create_reservation, cancel_reservation)가 함
+// =====================================================================
+function nextDay(s) { return fmt(addDays(parse(s), 1)); }
+const laterOf = (a, b) => (!a ? b : !b ? a : (a > b ? a : b));     // 빈 값 = 제한 없음
+const earlierOf = (a, b) => (!a ? b : !b ? a : (a < b ? a : b));
+
+// Supabase는 한 번에 최대 1000줄까지 주므로, 기간 조회는 1000줄씩 나눠 받음
+async function fetchAll(build) {
+  let all = [];
+  for (let start = 0; ; start += 1000) {
+    const { data, error } = await build().range(start, start + 999);
+    if (error) throw error;
+    all = all.concat(data);
+    if (data.length < 1000) return all;
+  }
+}
+
+const server = {
+  async getRooms() {
+    const { data, error } = await db.from('rooms').select('id, name, location').order('id');
+    if (error) throw error;
+    return data;
+  },
+
+  // 요일별 마지막 교시 + 예약 불가 목록 (학기 이름은 기간으로 바꿔서)
+  async getSettings() {
+    const [wp, tm, bl] = await Promise.all([
+      db.from('weekday_periods').select('weekday, last_period'),
+      db.from('terms').select('name, end_date').order('end_date'),
+      db.from('blocked_slots').select('*').order('id'),
+    ]);
+    for (const r of [wp, tm, bl]) if (r.error) throw r.error;
+    const byDay = { 1: 6, 2: 6, 3: 6, 4: 6, 5: 6 };
+    wp.data.forEach((r) => { byDay[r.weekday] = r.last_period; });
+    const terms = tm.data.map((t, i, arr) => ({ name: t.name, end: t.end_date, start: i ? nextDay(arr[i - 1].end_date) : null }));
+    const blocked = bl.data.map((b) => {
+      let from = b.date_from, to = b.date_to;
+      if (!to && b.weekday == null && !b.term_name) to = b.date_from;   // 날짜 하나만 = 그날 하루
+      const t = b.term_name ? terms.find((x) => x.name === b.term_name) : null;
+      if (t) { from = laterOf(from, t.start); to = earlierOf(to, t.end); }
+      const pf = b.period_from ?? 1, pt = b.period_to ?? b.period_from ?? 10;
+      return {
+        from: from || null, to: to || null, weekday: b.weekday ?? null,
+        periods: Array.from({ length: Math.max(0, pt - pf + 1) }, (_, i) => pf + i),
+        roomId: b.room_id ?? null, reason: b.reason,
+      };
+    });
+    return { byDay, maxPeriod: Math.max(1, ...Object.values(byDay)), blocked };
+  },
+
+  // 예약 목록 (시간표·검색·통계가 함께 사용)
+  async listReservations(f = {}) {
+    const build = () => {
+      let q = db.from('reservations')
+        .select('id, room_id, reserved_date, period, teacher_name, grade, class_no')
+        .order('reserved_date').order('period');
+      if (f.roomId) q = q.eq('room_id', Number(f.roomId));
+      if (f.from) q = q.gte('reserved_date', f.from);
+      if (f.to) q = q.lte('reserved_date', f.to);
+      if (f.date) q = q.eq('reserved_date', f.date);
+      if (f.teacher) q = q.ilike('teacher_name', `%${f.teacher}%`);
+      if (f.upcomingOnly) q = q.gte('reserved_date', todayStr());
+      return q;
+    };
+    let rows;
+    if (f.from || f.to) rows = await fetchAll(build);            // 시간표·통계: 기간 전체
+    else {                                                       // 검색 목록: 500건까지
+      const { data, error } = await build().limit(500);
+      if (error) throw error;
+      rows = data;
+    }
+    return rows.map((r) => ({ ...r, canCancel: true }));        // 버튼은 누구나 보이고, PIN이 맞아야 취소됨
+  },
+
+  async createReservation(row) {
+    const { error } = await db.rpc('create_reservation', {
+      p_room_id: row.room_id, p_date: row.reserved_date, p_period: row.period,
+      p_teacher: row.teacher_name, p_grade: row.grade, p_class: row.class_no, p_pin: row.pin,
+    });
+    if (!error) return { ok: true };
+    return { error: { code: error.code === '23505' ? 'DUPLICATE' : 'INVALID', message: error.message } };
+  },
+
+  async cancelReservation(id, pin) {
+    const { data, error } = await db.rpc('cancel_reservation', { p_id: Number(id), p_pin: pin });
+    if (error) throw error;
+    return data.ok ? { ok: true } : { error: { message: data.message } };
+  },
+};
+
+function api(fn, ...args) { return server[fn](...args); }
 
 // =====================================================================
 // 기본 설정
 // =====================================================================
-const PERIODS = [1, 2, 3, 4, 5, 6];
+let PERIODS = [1, 2, 3, 4, 5, 6];   // 시간표에 보여 줄 교시 (settings 탭의 가장 큰 값까지)
+let PERIODS_BY_DAY = { 1: 6, 2: 6, 3: 6, 4: 6, 5: 6 };   // 요일별 마지막 교시 (1=월 … 5=금)
+let BLOCKED = [];   // 예약 불가 목록: [{ from, to, weekday, periods: [2, 3], roomId: null(=전체), reason }]
 const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
-let db = null;              // Supabase 클라이언트 (콘솔에서도 db.from(...) 으로 사용 가능)
 let rooms = [];             // 특별실 목록
 let weekStart = mondayOf(new Date());   // 시간표에 보이는 주의 월요일
 
@@ -369,12 +477,44 @@ function toast(msg, type = '') {
   toastTimer = setTimeout(() => (t.className = ''), 3200);
 }
 function errMsg(e) {
-  if (e.code === '23505') return '이미 예약된 시간입니다. 다른 교시나 날짜를 골라 주세요.';
-  if (e.code === '23514') return '입력값이 허용 범위를 벗어났습니다. (교시·학년·반·글자 수 확인)';
-  if (e.code === '23503') return '존재하지 않는 특별실입니다. 새로고침 후 다시 시도해 주세요.';
-  if (e.code === '42501') return '권한이 없습니다. Supabase의 RLS 정책을 확인해 주세요.';
-  return '오류가 발생했습니다: ' + (e.message || e);
+  if (e.code === 'DUPLICATE') return '이미 예약된 시간입니다. 다른 교시나 날짜를 골라 주세요.';
+  return e.message || ('오류가 발생했습니다: ' + e);   // 서버가 보낸 안내 문구를 그대로 표시
 }
+// 그 날짜에 예약할 수 있는 마지막 교시 (주말·예약 불가 요일은 0)
+function maxFor(dateStr) { return dateStr ? (PERIODS_BY_DAY[parse(dateStr).getDay()] || 0) : 0; }
+
+// 날짜에 맞춰 교시 선택 칸을 다시 채움 (목요일이면 1~6교시, 나머지는 1~5교시 등)
+// 그 날짜·교시·특별실이 예약 불가 목록에 있으면 사유를, 아니면 '' 를 돌려줌
+//   from·to = 기간 (null 이면 제한 없음), weekday = 매주 요일 (0=일 … 6=토, null 이면 모든 요일)
+function blockMatches(x, dateStr, period, roomId) {
+  if (!x.periods.includes(Number(period))) return false;
+  if (x.roomId !== null && x.roomId !== Number(roomId)) return false;
+  if (x.from && dateStr < x.from) return false;
+  if (x.to && dateStr > x.to) return false;
+  if (x.weekday !== null && parse(dateStr).getDay() !== x.weekday) return false;
+  return true;
+}
+function blockedReason(dateStr, period, roomId) {
+  const b = BLOCKED.find((x) => blockMatches(x, dateStr, period, roomId));
+  return b ? b.reason : '';
+}
+
+// 날짜·특별실에 맞춰 교시 선택 칸을 다시 채움
+//   요일별 마지막 교시까지만 보여 주고, 예약 불가 교시는 사유와 함께 선택할 수 없게 표시
+function fillPeriodOptions(keep) {
+  const date = $('f-date').value, roomId = $('f-room').value;
+  const max = maxFor(date);
+  const want = Number(keep ?? $('f-period').value) || 1;
+  if (!max) { $('f-period').innerHTML = '<option value="">예약 불가</option>'; return; }
+  const opts = Array.from({ length: max }, (_, i) => {
+    const p = i + 1, why = blockedReason(date, p, roomId);
+    return { p, why, html: `<option value="${p}"${why ? ' disabled' : ''}>${p}교시${why ? ` (불가: ${esc(why)})` : ''}</option>` };
+  });
+  $('f-period').innerHTML = opts.map((o) => o.html).join('');
+  const pick = opts.find((o) => o.p === Math.min(want, max) && !o.why) || opts.find((o) => !o.why);
+  if (pick) $('f-period').value = String(pick.p);
+}
+
 function roomName(id) { return rooms.find((r) => r.id === Number(id))?.name ?? '?'; }
 function classLabel(r) { return r.class_no ? `${r.grade}학년 ${r.class_no}반` : `${r.grade}학년`; }
 
@@ -382,9 +522,8 @@ function classLabel(r) { return r.class_no ? `${r.grade}학년 ${r.class_no}반`
 // 특별실 불러오기
 // =====================================================================
 async function loadRooms() {
-  const { data, error } = await db.from('rooms').select('id, name, location').order('id');
-  if (error) { toast(errMsg(error), 'error'); return; }
-  rooms = data;
+  try { rooms = await api('getRooms'); }
+  catch (e) { toast(errMsg(e), 'error'); return; }
   const opts = rooms.map((r) => `<option value="${r.id}">${esc(r.name)}${r.location ? ' · ' + esc(r.location) : ''}</option>`).join('');
   $('f-room').innerHTML = opts;
   $('w-room').innerHTML = opts;
@@ -399,14 +538,18 @@ async function submitReservation(ev) {
   const date = $('f-date').value;
   const teacher = $('f-teacher').value.trim();
   const classNo = $('f-class').value;
-  const purpose = $('f-purpose').value.trim();
+  const pin = $('f-pin').value.trim();
 
   if (!date) return toast('날짜를 선택해 주세요.', 'error');
   const dow = parse(date).getDay();
   if (dow === 0 || dow === 6) return toast('주말에는 예약할 수 없습니다.', 'error');
   if (date < todayStr()) return toast('지난 날짜는 예약할 수 없습니다.', 'error');
+  if (!maxFor(date)) return toast(`${DAY_NAMES[dow]}요일은 예약할 수 없습니다.`, 'error');
+  const why = blockedReason(date, $('f-period').value, $('f-room').value);
+  if (!$('f-period').value || why) return toast(`이 시간은 예약할 수 없습니다 (${why || '예약 불가'}).`, 'error');
   if (!teacher) return toast('교사 이름을 입력해 주세요.', 'error');
   if (classNo && (classNo < 1 || classNo > 15)) return toast('반은 1~15 사이로 입력해 주세요.', 'error');
+  if (!/^[0-9]{4}$/.test(pin)) return toast('취소용 PIN을 숫자 4자리로 입력해 주세요.', 'error');
 
   const row = {
     room_id: Number($('f-room').value),
@@ -415,12 +558,14 @@ async function submitReservation(ev) {
     teacher_name: teacher,
     grade: Number($('f-grade').value),
     class_no: classNo ? Number(classNo) : null,
-    purpose: purpose || null,
+    pin,
   };
 
   const btn = $('f-submit');
   btn.disabled = true; btn.textContent = '저장 중…';
-  const { error } = await db.from('reservations').insert(row);
+  let error = null;
+  try { const res = await api('createReservation', row); error = res.error || null; }
+  catch (e) { error = e; }
   btn.disabled = false; btn.textContent = '예약하기';
 
   // 보고 있는 시간표를 방금 예약한 특별실·주로 맞춤
@@ -431,39 +576,86 @@ async function submitReservation(ev) {
     toast(errMsg(error), 'error');
   } else {
     toast(`${niceDate(date)} ${row.period}교시 ${roomName(row.room_id)} 예약 완료!`, 'ok');
-    $('f-purpose').value = '';
   }
+  invalidateCache();                                             // 예약 현황이 바뀌었으니 새로 받기
   await Promise.all([renderWeek(), loadList(), renderStats()]);   // 성공·실패 모두 최신 상태로 새로 고침 (차트 포함)
 }
 
 // =====================================================================
 // 2. 주간 시간표
 // =====================================================================
+// ---------- 시간표 데이터 받아 두기 (캐시) ----------
+//   서버에 한 번 갈 때 앞 4주 ~ 뒤 9주, 모든 특별실의 예약을 한꺼번에 받아 둠
+//   → 그 범위 안에서는 주차·특별실을 바꿔도 서버에 가지 않아 즉시 바뀜
+const CACHE_TTL = 60 * 1000;     // 받아 둔 지 1분이 지나면 뒤에서 조용히 새로 받음
+let cache = { from: '', to: '', rows: [], at: 0 };
+let inflight = null;             // 지금 받아 오는 중인 요청 (같은 요청을 겹쳐 보내지 않도록)
+let renderToken = 0;             // 빠르게 여러 번 눌렀을 때 마지막 주만 그리도록
+
+function cacheCovers(from, to) { return cache.at > 0 && cache.from <= from && to <= cache.to; }
+function invalidateCache() { cache.at = 0; }      // 예약·취소 후에는 새로 받도록
+
+function loadWindowAround(start) {
+  if (inflight) return inflight;
+  const from = fmt(addDays(start, -28)), to = fmt(addDays(start, 9 * 7 - 3));
+  inflight = api('listReservations', { from, to })
+    .then((rows) => { cache = { from, to, rows, at: Date.now() }; })
+    .finally(() => { inflight = null; });
+  return inflight;
+}
+
+function setLoading(on) { $('tt-wrap').classList.toggle('loading', on); }
+
+// =====================================================================
+// 2. 주간 시간표
+// =====================================================================
 async function renderWeek() {
-  const roomId = Number($('w-room').value);
+  const token = ++renderToken;
   const days = [0, 1, 2, 3, 4].map((i) => addDays(weekStart, i));
   const friday = days[4];
   const today = todayStr();
 
+  // 날짜 머리글은 기다리지 않고 바로 바꿈
   $('w-label').textContent =
     `${weekStart.getMonth() + 1}월 ${weekStart.getDate()}일 ~ ${friday.getMonth() + 1}월 ${friday.getDate()}일`;
-
   $('w-head').innerHTML = '<tr><th></th>' + days.map((d) => {
     const isToday = fmt(d) === today;
     return `<th class="${isToday ? 'today' : ''}">${DAY_NAMES[d.getDay()]}<span class="date">${d.getMonth() + 1}/${d.getDate()}${isToday ? ' 오늘' : ''}</span></th>`;
   }).join('') + '</tr>';
 
-  if (!roomId) { $('w-body').innerHTML = ''; return; }
+  const from = fmt(weekStart), to = fmt(friday);
+  if (!cacheCovers(from, to)) {
+    // 받아 둔 범위 밖 → 이번에만 기다림 ("불러오는 중" 표시)
+    setLoading(true);
+    try {
+      if (inflight) await inflight;                       // 이미 받는 중이면 그것부터 기다림
+      if (!cacheCovers(from, to)) await loadWindowAround(weekStart);
+    } catch (e) { toast(errMsg(e), 'error'); }
+    finally { if (token === renderToken) setLoading(false); }
+  } else if (Date.now() - cache.at > CACHE_TTL && !inflight) {
+    // 받아 둔 지 오래됨 → 지금 화면은 바로 그리고, 뒤에서 새로 받아 다시 그림
+    loadWindowAround(weekStart).then(() => { if (token === renderToken) drawWeek(); }).catch(() => {});
+  }
+  if (token !== renderToken) return;                       // 그사이 다른 주로 넘어감
+  drawWeek();
 
-  const { data, error } = await db.from('reservations')
-    .select('id, reserved_date, period, teacher_name, grade, class_no, purpose')
-    .eq('room_id', roomId)
-    .gte('reserved_date', fmt(weekStart))
-    .lte('reserved_date', fmt(friday));
-  if (error) { toast(errMsg(error), 'error'); return; }
+  // 미리 받아 두기: 받아 둔 범위 끝까지 2주도 안 남았으면 뒤에서 범위를 옮겨 받음
+  const nearEnd = fmt(addDays(weekStart, 18)) > cache.to || fmt(addDays(weekStart, -14)) < cache.from;
+  if (cache.at && nearEnd && !inflight) loadWindowAround(weekStart).catch(() => {});
+}
+
+// 받아 둔 데이터로 시간표 칸을 그림 (서버에 가지 않음)
+function drawWeek() {
+  const roomId = Number($('w-room').value);
+  if (!roomId) { $('w-body').innerHTML = ''; return; }
+  const days = [0, 1, 2, 3, 4].map((i) => addDays(weekStart, i));
+  const today = todayStr();
+  const from = fmt(days[0]), to = fmt(days[4]);
 
   const map = {};
-  data.forEach((r) => (map[`${r.reserved_date}_${r.period}`] = r));
+  cache.rows.forEach((r) => {
+    if (r.room_id === roomId && r.reserved_date >= from && r.reserved_date <= to) map[`${r.reserved_date}_${r.period}`] = r;
+  });
 
   $('w-body').innerHTML = PERIODS.map((p) => {
     const cells = days.map((d) => {
@@ -472,10 +664,18 @@ async function renderWeek() {
       const cls = ['slot'];
       if (ds === today) cls.push('today');
       if (ds < today) cls.push('past');
-      if (r) {
+      if (!r && p > maxFor(ds)) {                    // settings 탭에서 막아 둔 시간
+        cls.push('closed');
+        return `<td class="${cls.join(' ')}">—</td>`;
+      }
+      const why = !r && blockedReason(ds, p, roomId); // 예약 불가 목록 (행사·공휴일 등)
+      if (why) {
+        cls.push('closed', 'blocked');
+        return `<td class="${cls.join(' ')}" title="${esc(why)}">${esc(why)}</td>`;
+      }
+      if (r) {                                       // 예약은 시간표가 바뀌어도 그대로 보여 줌
         cls.push('booked');
-        const tip = r.purpose ? ` title="${esc(r.purpose)}"` : '';
-        return `<td class="${cls.join(' ')}"${tip}><strong>${esc(r.teacher_name)}</strong><span>${esc(classLabel(r))}</span></td>`;
+        return `<td class="${cls.join(' ')}"><strong>${esc(r.teacher_name)}</strong><span>${esc(classLabel(r))}</span></td>`;
       }
       return `<td class="${cls.join(' ')}" data-date="${ds}" data-period="${p}">${ds < today ? '' : '+ 예약'}</td>`;
     }).join('');
@@ -486,10 +686,10 @@ async function renderWeek() {
 // 빈칸 클릭 → 예약 등록 칸 채우기
 function onSlotClick(ev) {
   const td = ev.target.closest('td.slot');
-  if (!td || td.classList.contains('booked') || td.classList.contains('past')) return;
+  if (!td || ['booked', 'past', 'closed'].some((c) => td.classList.contains(c))) return;
   $('f-room').value = $('w-room').value;
   $('f-date').value = td.dataset.date;
-  $('f-period').value = td.dataset.period;
+  fillPeriodOptions(td.dataset.period);
   $('form-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
   setTimeout(() => $('f-teacher').focus(), 400);
 }
@@ -503,19 +703,10 @@ async function loadList() {
   const date = $('s-date').value;
   const showPast = $('s-past').checked;
 
-  let q = db.from('reservations')
-    .select('id, room_id, reserved_date, period, teacher_name, grade, class_no, purpose')
-    .order('reserved_date', { ascending: true })
-    .order('period', { ascending: true })
-    .limit(200);
-
-  if (teacher) q = q.ilike('teacher_name', `%${teacher}%`);
-  if (roomId) q = q.eq('room_id', Number(roomId));
-  if (date) q = q.eq('reserved_date', date);
-  else if (!showPast) q = q.gte('reserved_date', todayStr());
-
-  const { data, error } = await q;
-  if (error) { toast(errMsg(error), 'error'); return; }
+  let data;
+  try {
+    data = await api('listReservations', { teacher, roomId, date, upcomingOnly: !date && !showPast });
+  } catch (e) { toast(errMsg(e), 'error'); return; }
 
   if (!data.length) {
     $('list').innerHTML = '<div class="empty">조건에 맞는 예약이 없습니다.</div>';
@@ -526,9 +717,9 @@ async function loadList() {
     <div class="item ${r.reserved_date < today ? 'past' : ''}">
       <div class="when">${niceDate(r.reserved_date)}</div>
       <div class="room">${r.period}교시 · ${esc(roomName(r.room_id))}</div>
-      <div class="who">${esc(r.teacher_name)} 선생님 · ${esc(classLabel(r))}${r.purpose ? `<small>${esc(r.purpose)}</small>` : ''}</div>
-      <button type="button" class="danger" data-id="${r.id}"
-        data-label="${esc(`${niceDate(r.reserved_date)} ${r.period}교시 ${roomName(r.room_id)} (${r.teacher_name})`)}">취소</button>
+      <div class="who">${esc(r.teacher_name)} 선생님 · ${esc(classLabel(r))}</div>
+      ${r.canCancel ? `<button type="button" class="danger" data-id="${esc(r.id)}"
+        data-label="${esc(`${niceDate(r.reserved_date)} ${r.period}교시 ${roomName(r.room_id)} (${r.teacher_name})`)}">취소</button>` : '<span></span>'}
     </div>`).join('');
 }
 
@@ -538,17 +729,19 @@ async function loadList() {
 async function onCancelClick(ev) {
   const btn = ev.target.closest('button[data-id]');
   if (!btn) return;
-  if (!confirm(`${btn.dataset.label} 예약을 취소할까요?\n취소하면 되돌릴 수 없습니다.`)) return;
+  const pin = prompt(`${btn.dataset.label} 예약을 취소합니다.\n예약할 때 정한 PIN 4자리를 입력하세요.`);
+  if (pin === null) return;                                       // 취소 버튼을 누름
 
   btn.disabled = true;
-  const { data, error } = await db.from('reservations').delete().eq('id', Number(btn.dataset.id)).select('id');
+  let error = null;
+  try { const res = await api('cancelReservation', btn.dataset.id, pin.trim()); error = res.error || null; }
+  catch (e) { error = e; }
   if (error) {
     toast(errMsg(error), 'error');
-  } else if (!data.length) {
-    toast('이미 취소되었거나 삭제 권한이 없습니다.', 'error');
   } else {
     toast('예약을 취소했습니다.', 'ok');
   }
+  invalidateCache();
   await Promise.all([renderWeek(), loadList(), renderStats()]);
 }
 
@@ -570,6 +763,20 @@ function rangeOf(kind) {
   return { from: mon, to: addDays(mon, 4) };
 }
 
+// 기간 안에서 특별실 하나가 예약될 수 있는 칸 수 (요일별 교시 수의 합)
+//   roomId 를 주면 그 특별실의 예약 불가 교시를 빼고 셈
+function countSlots(from, to, roomId = null) {
+  let n = 0;
+  for (let d = new Date(from); d <= to; d = addDays(d, 1)) {
+    const max = PERIODS_BY_DAY[d.getDay()] || 0, ds = fmt(d);
+    for (let p = 1; p <= max; p++) {
+      const b = BLOCKED.some((x) => blockMatches(x, ds, p, roomId));
+      if (!b) n++;
+    }
+  }
+  return n;
+}
+
 // 기간 안의 평일 수
 function countWeekdays(from, to) {
   let n = 0;
@@ -587,25 +794,24 @@ function drawChart(id, config) {
 }
 
 async function renderStats() {
-  if (!db || $('tab-stats').hidden) return;   // 통계 탭이 보일 때만 그림
+  if ($('tab-stats').hidden) return;   // 통계 탭이 보일 때만 그림
   const { from, to } = rangeOf(statsRange);
 
-  const { data, error } = await db.from('reservations')
-    .select('room_id, reserved_date, period, grade')
-    .gte('reserved_date', fmt(from))
-    .lte('reserved_date', fmt(to));
-  if (error) { toast(errMsg(error), 'error'); return; }
+  let data;
+  try { data = await api('listReservations', { from: fmt(from), to: fmt(to) }); }
+  catch (e) { toast(errMsg(e), 'error'); return; }
 
   const weekdays = countWeekdays(from, to);
-  const slots = weekdays * PERIODS.length;     // 특별실 하나가 기간 동안 예약될 수 있는 칸 수
+  const slots = countSlots(from, to);          // 특별실 하나가 기간 동안 예약될 수 있는 칸 수 (settings 탭 기준)
   $('st-summary').innerHTML =
     `기간 <strong>${from.getMonth() + 1}/${from.getDate()} ~ ${to.getMonth() + 1}/${to.getDate()}</strong>` +
-    ` · 평일 <strong>${weekdays}일</strong> · 특별실당 <strong>${slots}칸</strong>` +
+    ` · 평일 <strong>${weekdays}일</strong> · 특별실당 최대 <strong>${slots}칸</strong>` +
     ` · 예약 <strong>${data.length}건</strong>`;
 
   // ① 특별실별 이용률 (가로 막대, %)
   const byRoom = rooms.map((r) => data.filter((x) => x.room_id === r.id).length);
-  const util = byRoom.map((c) => (slots ? Math.round((c / slots) * 1000) / 10 : 0));
+  const roomSlots = rooms.map((r) => countSlots(from, to, r.id));   // 특별실마다 예약 불가 교시를 뺀 칸 수
+  const util = byRoom.map((c, i) => (roomSlots[i] ? Math.round((c / roomSlots[i]) * 1000) / 10 : 0));
   drawChart('ch-rooms', {
     type: 'bar',
     data: {
@@ -617,7 +823,7 @@ async function renderStats() {
       maintainAspectRatio: false,
       plugins: {
         legend: { display: false },
-        tooltip: { callbacks: { label: (c) => `${c.parsed.x}% (${byRoom[c.dataIndex]}건 / ${slots}칸)` } },
+        tooltip: { callbacks: { label: (c) => `${c.parsed.x}% (${byRoom[c.dataIndex]}건 / ${roomSlots[c.dataIndex]}칸)` } },
       },
       scales: { x: { min: 0, max: 100, ticks: { callback: (v) => v + '%' } }, y: { grid: { display: false } } },
     },
@@ -653,7 +859,7 @@ async function renderStats() {
           grid: { display: false },
         },
         y: {
-          reverse: true, min: 0.5, max: 6.5,                  // 1교시가 위에 오도록 뒤집음
+          reverse: true, min: 0.5, max: PERIODS.length + 0.5,  // 1교시가 위에 오도록 뒤집음
           afterBuildTicks: (axis) => { axis.ticks = PERIODS.map((value) => ({ value })); },
           ticks: { callback: (v) => v + '교시' },
         },
@@ -706,8 +912,22 @@ async function init() {
   $('f-date').min = todayStr();
   weekStart = mondayOf(d);
 
+  try {                                           // settings 탭: 요일별 마지막 교시
+    const st = await api('getSettings');
+    PERIODS_BY_DAY = st.byDay;
+    // 빠진 값은 "제한 없음"(null)으로 맞춤
+    BLOCKED = (st.blocked || []).map((x) => ({
+      ...x, roomId: x.roomId ?? null, from: x.from ?? null, to: x.to ?? null, weekday: x.weekday ?? null,
+    }));
+    PERIODS = Array.from({ length: st.maxPeriod }, (_, i) => i + 1);
+  } catch (e) { toast(errMsg(e), 'error'); }
+  fillPeriodOptions();
+
   await loadRooms();
+  fillPeriodOptions();                            // 특별실이 정해진 뒤 한 번 더 (특별실별 예약 불가 반영)
   await Promise.all([renderWeek(), loadList()]);
+  $('f-date').addEventListener('change', () => fillPeriodOptions());
+  $('f-room').addEventListener('change', () => fillPeriodOptions());
 
   $('form').addEventListener('submit', submitReservation);
   $('w-room').addEventListener('change', renderWeek);
